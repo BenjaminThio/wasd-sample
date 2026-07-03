@@ -1,8 +1,8 @@
 <?php
-/* Shared header — expects $conn from config.php.
+/* Shared header — expects $db from config.php.
    Optional: set $page_title before including. */
-$nav_user  = current_user($conn);
-$nav_cart  = cart_count($conn);
+$nav_user  = current_user($db);
+$nav_cart  = cart_count($db);
 $nav_flash = get_flash();
 if (!isset($page_title)) $page_title = 'WASD — Your next obsession starts here';
 $here = basename($_SERVER['PHP_SELF']);
