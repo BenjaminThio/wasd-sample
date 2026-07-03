@@ -55,6 +55,7 @@ include 'includes/header.php';
   </div>
 </header>
 
+<!-- TICKER -->
 <div class="ticker" aria-hidden="true">
   <div class="ticker-track">
     <span><?php echo $ticker_html; ?></span>
@@ -62,6 +63,7 @@ include 'includes/header.php';
   </div>
 </div>
 
+<!-- FEATURED GAMES -->
 <section>
   <div class="wrap">
     <span class="eyebrow">Featured this week</span>
@@ -93,6 +95,52 @@ include 'includes/header.php';
           </div>
         </a>
       <?php endforeach; ?>
+    </div>
+  </div>
+</section>
+
+<!-- HOW IT WORKS -->
+<section>
+  <div class="wrap">
+    <span class="eyebrow">How WASD works</span>
+    <h2>Three keys to press.<br>That's the whole tutorial.</h2>
+
+    <div class="steps-grid">
+      <div class="card step-card reveal">
+        <div class="step-key">W</div>
+        <h3>Create your account</h3>
+        <p>One username, one email, zero spam. Pick an avatar and your favorite genres so the store knows what to show you first.</p>
+      </div>
+      <div class="card step-card reveal">
+        <div class="step-key">A</div>
+        <h3>Build your collection</h3>
+        <p>Wishlist the games you're watching and drop the ones you want into your cart. Reviews from real players help you choose.</p>
+      </div>
+      <div class="card step-card reveal">
+        <div class="step-key">S</div>
+        <h3>Check out in seconds</h3>
+        <p>A clean order summary, honest discounts, and your full order history saved to your profile. No launchers to fight.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- CTA -->
+<section>
+  <div class="wrap">
+    <div class="cta-panel reveal">
+      <span class="eyebrow">Free forever</span>
+      <h2>Press start on your library</h2>
+      <p class="section-sub" style="margin:0 auto">Join WASD to unlock your wishlist, cart, and reviews.</p>
+      <div class="hero-ctas" style="margin-top:32px">
+        <?php if (!$nav_user): ?>
+          <a class="btn" href="register.php">Sign up free</a>
+          <a class="btn ghost" href="login.php">I already have an account</a>
+        <?php else: ?>
+          <a class="btn" href="games.php">Keep browsing</a>
+          <a class="btn ghost" href="profile.php">View my profile</a>
+        <?php endif; ?>
+      </div>
     </div>
   </div>
 </section>
