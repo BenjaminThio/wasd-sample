@@ -26,7 +26,7 @@ class FirestoreClient {
         }
         
         $response = curl_exec($ch);
-        curl_close($ch);
+        // curl_close($ch);  <--- MAKE SURE THIS LINE IS DELETED
         return json_decode($response, true);
     }
 
