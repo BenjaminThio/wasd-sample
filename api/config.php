@@ -1,8 +1,11 @@
 <?php
 session_start();
 
-define('FIREBASE_PROJECT_ID', 'YOUR_PROJECT_ID');
-define('FIREBASE_API_KEY', 'YOUR_API_KEY');
+$project_id = getenv('FIREBASE_PROJECT_ID');
+$api_key = getenv('FIREBASE_API_KEY');
+
+define('FIREBASE_PROJECT_ID', $project_id);
+define('FIREBASE_API_KEY', $api_key);
 
 class FirestoreClient {
     private $base_url;
