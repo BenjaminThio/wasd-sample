@@ -3,7 +3,7 @@ require_once 'config.php';
 
 $errors = array();
 $sent = false;
-$user = current_user($db);
+$user = current_user($conn);
 $old = array(
     'name'    => $user ? $user['username'] : '',
     'email'   => $user ? $user['email'] : '',
@@ -22,16 +22,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if ($old['subject'] === '') $errors[] = 'Add a subject line.';
     if ($old['message'] === '' || strlen($old['message']) < 10) $errors[] = 'Write a message of at least 10 characters.';
 
-    /* CREATE: store the inquiry in Firestore */
+    /* CREATE: store the inquiry */
     if (!$errors) {
-        $msg_id = 'msg_' . uniqid();
-        $db->saveDocument('messages', $msg_id, [
+        create_message($conn, array(
             'name' => $old['name'],
             'email' => $old['email'],
             'subject' => $old['subject'],
             'message' => $old['message'],
-            'created_at' => date('c')
-        ]);
+        ));
         $sent = true;
         $old['subject'] = '';
         $old['message'] = '';

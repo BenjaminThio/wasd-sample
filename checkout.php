@@ -1,24 +1,12 @@
 <?php
 require_once 'config.php';
-require_login($db);
-$user = current_user($db);
+require_login($conn);
+$user = current_user($conn);
 
-$all_carts = $db->getCollection('carts');
-$rows = [];
+/* ---------- fetch cart contents (needed for both GET and POST) ---------- */
+$rows = get_cart_items($conn, $user['id']);
 $total = 0;
-
-foreach ($all_carts as $cart) {
-    if ($cart['user_id'] === $user['id']) {
-        $game = $db->getDocument('games', $cart['game_id']);
-        if ($game) {
-            $game['quantity'] = $cart['quantity'];
-            $game['unit_final'] = final_price($game['price'], $game['discount'] ?? 0);
-            $game['line_total'] = $game['unit_final'] * $game['quantity'];
-            $total += $game['line_total'];
-            $rows[] = $game;
-        }
-    }
-}
+foreach ($rows as $row) $total += $row['line_total'];
 
 /* ---------- place the order ---------- */
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['action'] === 'place_order') {
@@ -28,52 +16,29 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
         exit;
     }
 
-    $order_id = 'order_' . uniqid();
-    
-    // Save the main order metadata document
-    $db->saveDocument('orders', $order_id, [
-        'user_id' => $user['id'],
-        'total' => (float)$total,
-        'created_at' => date('c')
-    ]);
-
-    // Save individual sub-collection entries for order items
+    /* snapshot title + price paid per line, same as the old order_items table */
+    $line_items = array();
     foreach ($rows as $row) {
-        $item_id = $order_id . '_' . $row['id'];
-        $db->saveDocument('order_items', $item_id, [
-            'order_id' => $order_id,
-            'game_id' => $row['id'],
-            'title' => $row['title'],
-            'price' => (float)$row['unit_final'],
-            'quantity' => (int)$row['quantity']
-        ]);
-
-        // Clean up cart item
-        $cart_id = $user['id'] . '_' . $row['id'];
-        $db->deleteDocument('carts', $cart_id);
+        $line_items[] = array(
+            'game_id'  => (int)$row['id'],
+            'title'    => $row['title'],
+            'price'    => (float)$row['unit_final'],
+            'quantity' => (int)$row['quantity'],
+        );
     }
 
-    // Reset user cart badge tracker count
-    $db->saveDocument('users', $user['id'], [
-        'cart_item_count' => 0
-    ]);
+    $order_id = create_order($conn, $user['id'], $total, $line_items);
+    clear_cart($conn, $user['id']);
 
     header('Location: checkout.php?done=' . $order_id);
     exit;
 }
 
+/* ---------- order confirmation view ---------- */
 $done_order = null;
-$done_items = [];
 if (isset($_GET['done'])) {
-    $done_order = $db->getDocument('orders', $_GET['done']);
-    if ($done_order && $done_order['user_id'] === $user['id']) {
-        $all_items = $db->getCollection('order_items');
-        foreach ($all_items as $it) {
-            if ($it['order_id'] === $done_order['id']) {
-                $done_items[] = $it;
-            }
-        }
-    }
+    $order_id = (int)$_GET['done'];
+    $done_order = get_order($conn, $order_id, $user['id']);
 }
 
 $page_title = 'Checkout — WASD';
@@ -84,15 +49,18 @@ include 'includes/header.php';
   <div class="wrap">
 
     <?php if ($done_order): ?>
+      <!-- ============ order placed ============ -->
       <span class="eyebrow">Order confirmed</span>
       <h1 class="page-title">You're in. Game on.</h1>
-      <p class="section-sub">Order <strong style="color:var(--cyan)">#<?php echo e($done_order['id']); ?></strong>. Your games are ready.</p>
+      <p class="section-sub">Order <strong style="color:var(--cyan)">#WASD-<?php echo str_pad($done_order['id'], 5, '0', STR_PAD_LEFT); ?></strong>
+        placed on <?php echo ts_fmt($done_order['created_at'], 'j M Y, g:i a'); ?>.
+        Your games are ready to download from your library.</p>
 
       <div class="table-wrap" style="max-width:760px">
         <table>
           <thead><tr><th>Game</th><th>Price paid</th><th>Qty</th><th>Line total</th></tr></thead>
           <tbody>
-            <?php foreach ($done_items as $it): ?>
+            <?php foreach ($done_order['items'] as $it): ?>
               <tr>
                 <td><strong><?php echo e($it['title']); ?></strong></td>
                 <td><span class="price"><?php echo rm($it['price']); ?></span></td>
@@ -108,14 +76,21 @@ include 'includes/header.php';
         </table>
       </div>
 
+      <div class="hero-ctas" style="justify-content:flex-start;margin-top:34px">
+        <a class="btn" href="games.php">Keep browsing</a>
+        <a class="btn ghost" href="profile.php">View order history</a>
+      </div>
+
     <?php elseif (count($rows) === 0): ?>
       <span class="eyebrow">Checkout</span>
       <h1 class="page-title">Nothing to check out</h1>
       <div class="empty">Your cart is empty. Find something in <a href="games.php">the store</a> first.</div>
 
     <?php else: ?>
+      <!-- ============ review + confirm ============ -->
       <span class="eyebrow">Checkout</span>
       <h1 class="page-title">Review your order</h1>
+      <p class="section-sub">One last look before the download buttons light up. This is a simulated payment for demo purposes — no card needed.</p>
 
       <div class="table-wrap" style="max-width:760px">
         <table>
@@ -123,7 +98,12 @@ include 'includes/header.php';
           <tbody>
             <?php foreach ($rows as $row): ?>
               <tr>
-                <td><strong><?php echo e($row['title']); ?></strong></td>
+                <td>
+                  <div class="cell-game">
+                    <span class="thumb <?php echo e($row['art']); ?>"></span>
+                    <span><strong><?php echo e($row['title']); ?></strong><small><?php echo e($row['genre']); ?></small></span>
+                  </div>
+                </td>
                 <td><span class="price"><?php echo rm($row['unit_final']); ?></span></td>
                 <td><?php echo (int)$row['quantity']; ?></td>
                 <td><span class="price"><?php echo rm($row['line_total']); ?></span></td>
@@ -134,11 +114,13 @@ include 'includes/header.php';
       </div>
 
       <div class="card static summary-box" style="max-width:420px">
+        <div class="summary-row"><span>Billed to</span><span><?php echo e($user['username']); ?> (<?php echo e($user['email']); ?>)</span></div>
         <div class="summary-row total"><span>Total</span><span class="price"><?php echo rm($total); ?></span></div>
         <form method="post" action="checkout.php" style="margin-top:18px">
           <input type="hidden" name="action" value="place_order">
           <button class="btn full" type="submit">Place order — <?php echo rm($total); ?></button>
         </form>
+        <a class="btn ghost full" href="cart.php" style="margin-top:11px">Back to cart</a>
       </div>
     <?php endif; ?>
 

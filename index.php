@@ -1,21 +1,36 @@
 <?php
 require_once 'config.php';
 
-$all_games = $db->getCollection('games');
-
-// Sort by pre-calculated average rating descending
-usort($all_games, function($a, $b) {
-    return ($b['avg_rating'] ?? 0) <=> ($a['avg_rating'] ?? 0);
+/* Featured: top-rated games (average of reviews), newest first as tiebreak.
+   Firestore can't do AVG()/JOIN/ORDER BY on the server, so we pull all
+   games (get_all_games() already computes avg_rating/review_count) and
+   sort/limit here in PHP — perfectly fine for a catalog this size. */
+$all_games = get_all_games($conn);
+usort($all_games, function ($a, $b) {
+    if (($a['avg_rating'] === null) !== ($b['avg_rating'] === null)) {
+        return $a['avg_rating'] === null ? 1 : -1;
+    }
+    if ($a['avg_rating'] != $b['avg_rating']) return $b['avg_rating'] <=> $a['avg_rating'];
+    return $b['created_at'] <=> $a['created_at'];
 });
 $featured = array_slice($all_games, 0, 4);
 
-$ticker_parts = [];
-foreach ($all_games as $t) {
-    $label = ($t['discount'] ?? 0) > 0 ? '<i>−' . (int)$t['discount'] . '%</i>'
-           : (($t['badge'] ?? '') ? '<b>' . e(strtoupper($t['badge'])) . '</b>' : '<b>IN STORE</b>');
+/* Ticker: every game title + its discount/badge */
+$ticker_games = $all_games;
+usort($ticker_games, function ($a, $b) { return $a['id'] <=> $b['id']; });
+$ticker_parts = array();
+foreach ($ticker_games as $t) {
+    $label = $t['discount'] > 0 ? '<i>−' . (int)$t['discount'] . '%</i>'
+           : (!empty($t['badge']) ? '<b>' . e(strtoupper($t['badge'])) . '</b>' : '<b>IN STORE</b>');
     $ticker_parts[] = e($t['title']) . ' ' . $label;
 }
 $ticker_html = implode(' ', $ticker_parts);
+
+/* quick stats */
+$all_users = $conn->all('users');
+$all_reviews = $conn->all('reviews');
+$max_discount = 0;
+foreach ($all_games as $g) $max_discount = max($max_discount, (int)$g['discount']);
 
 $page_title = 'WASD — Your next obsession starts here';
 include 'includes/header.php';
@@ -48,14 +63,14 @@ include 'includes/header.php';
 
     <div class="hero-meta boot d5">
       <div><strong><?php echo count($all_games); ?></strong><small>Games</small></div>
-      <div><strong>74</strong><small>Players</small></div>
-      <div><strong>−75%</strong><small>Top Deal</small></div>
-      <div><strong>12</strong><small>Reviews</small></div>
+      <div><strong><?php echo count($all_users); ?></strong><small>Players</small></div>
+      <div><strong>−<?php echo (int)$max_discount; ?>%</strong><small>Top deal</small></div>
+      <div><strong><?php echo count($all_reviews); ?></strong><small>Reviews</small></div>
     </div>
   </div>
 </header>
 
-<!-- TICKER -->
+<!-- TICKER (built from the live games table) -->
 <div class="ticker" aria-hidden="true">
   <div class="ticker-track">
     <span><?php echo $ticker_html; ?></span>
@@ -72,10 +87,10 @@ include 'includes/header.php';
 
     <div class="games-grid">
       <?php foreach ($featured as $g): ?>
-        <a class="game-card reveal" href="game.php?id=<?php echo e($g['id']); ?>">
-          <div class="game-art <?php echo e($g['art'] ?? 'art-1'); ?>">
+        <a class="game-card reveal" href="game.php?id=<?php echo (int)$g['id']; ?>">
+          <div class="game-art <?php echo e($g['art']); ?>">
             <?php if (!empty($g['badge'])): ?><span class="tag"><?php echo e($g['badge']); ?></span><?php endif; ?>
-            <?php if (isset($g['avg_rating'])): ?>
+            <?php if ($g['avg_rating'] !== null): ?>
               <span class="rating">★ <?php echo number_format($g['avg_rating'], 1); ?></span>
             <?php endif; ?>
           </div>
@@ -84,13 +99,13 @@ include 'includes/header.php';
             <div class="genre"><?php echo e($g['genre']); ?> · <?php echo e($g['developer']); ?></div>
             <div class="game-price">
               <span class="price">
-                <?php if (($g['discount'] ?? 0) > 0): ?>
+                <?php if ($g['discount'] > 0): ?>
                   <span class="old"><?php echo rm($g['price']); ?></span><?php echo rm(final_price($g['price'], $g['discount'])); ?>
                 <?php else: ?>
                   <?php echo rm($g['price']); ?>
                 <?php endif; ?>
               </span>
-              <?php if (($g['discount'] ?? 0) > 0): ?><span class="off">−<?php echo (int)$g['discount']; ?>%</span><?php endif; ?>
+              <?php if ($g['discount'] > 0): ?><span class="off">−<?php echo (int)$g['discount']; ?>%</span><?php endif; ?>
             </div>
           </div>
         </a>
