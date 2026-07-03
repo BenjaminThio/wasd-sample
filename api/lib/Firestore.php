@@ -128,7 +128,6 @@ class Firestore
             ? ['Content-Type: application/x-www-form-urlencoded']
             : ['Content-Type: application/json', 'Authorization: Bearer ' . $this->getAccessToken()]);
         $result = curl_exec($ch);
-        curl_close($ch);
         return $result;
     }
 
