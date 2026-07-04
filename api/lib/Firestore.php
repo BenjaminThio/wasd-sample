@@ -6,19 +6,25 @@
    ship the grpc extension that the official google/cloud-firestore
    SDK needs.
 
-   Auth: uses a Google service account (JSON key) and signs its
-   own JWT with openssl to get an OAuth2 access token. The token
-   is cached to a tmp file for the lifetime of the container.
+   Auth: uses your Firebase project's Web API key (the same one
+   from the "Web app" config in the Firebase console), appended as
+   a ?key=... query parameter on every request. This is simpler
+   than a service account (no JWT signing, no OAuth token exchange)
+   but it means Firestore Security Rules — not Google-verified
+   server identity — are the ONLY thing standing between the
+   internet and your data. See README.md's security warning:
+   this setup requires Security Rules open enough to allow
+   unauthenticated read/write, which exposes every document in
+   your database (including password hashes) to anyone who has
+   the project id + API key. Acceptable for a personal/demo
+   project; not recommended for anything handling real user data.
    ============================================================ */
 
 class Firestore
 {
     private $projectId;
-    private $clientEmail;
-    private $privateKey;
+    private $apiKey;
     private $baseUrl;
-    private static $accessToken = null;
-    private static $accessTokenExpires = 0;
 
     /* Per-request read cache. Pages like games.php/index.php call
        all('games') or where(...) more than once while building a page
@@ -28,129 +34,63 @@ class Firestore
        the relevant cache entries so you never read stale data back. */
     private $cache = array();
 
-    public function __construct($projectId, $clientEmail, $privateKey)
+    /* One curl handle reused for every request this instance makes.
+       Closing and reopening a connection forces a fresh TCP + TLS
+       handshake for every single Firestore call — on a page that makes
+       6-8 calls, that's 6-8 handshakes instead of 1. Reusing the handle
+       lets curl keep the underlying connection to firestore.googleapis.com
+       alive and reuse it for subsequent calls in the same request. */
+    private $ch = null;
+
+    public function __construct($projectId, $apiKey)
     {
         $this->projectId = $projectId;
-        $this->clientEmail = $clientEmail;
-        // Environment variables often store the key with literal "\n" — turn them back into real newlines.
-        $this->privateKey = str_replace('\n', "\n", $privateKey);
+        $this->apiKey = $apiKey;
         $this->baseUrl = "https://firestore.googleapis.com/v1/projects/{$projectId}/databases/(default)/documents";
     }
 
     /** Build a Firestore client straight from environment variables. */
     public static function fromEnv()
     {
-        $projectId   = getenv('FIRESTORE_PROJECT_ID');
-        $clientEmail = getenv('FIRESTORE_CLIENT_EMAIL');
-        $privateKey  = getenv('FIRESTORE_PRIVATE_KEY');
+        $projectId = getenv('FIRESTORE_PROJECT_ID');
+        $apiKey    = getenv('FIRESTORE_API_KEY');
 
-        if (!$projectId || !$clientEmail || !$privateKey) {
-            die('Firestore credentials are missing. Set FIRESTORE_PROJECT_ID, FIRESTORE_CLIENT_EMAIL, '
-              . 'and FIRESTORE_PRIVATE_KEY as environment variables.');
+        if (!$projectId || !$apiKey) {
+            die('Firestore credentials are missing. Set FIRESTORE_PROJECT_ID and FIRESTORE_API_KEY as environment variables.');
         }
-        return new self($projectId, $clientEmail, $privateKey);
+        return new self($projectId, $apiKey);
     }
 
-    /* ============================================================
-       AUTH — service account JWT bearer flow
-       ============================================================ */
-
-    private function getAccessToken()
+    /** Append ?key=... (or &key=... if the URL already has a query string). */
+    private function withKey($url)
     {
-        $cacheFile = sys_get_temp_dir() . '/firestore_token_' . md5($this->clientEmail) . '.json';
-
-        // in-memory (same request) cache
-        if (self::$accessToken && time() < self::$accessTokenExpires - 30) {
-            return self::$accessToken;
-        }
-        // cross-request cache in /tmp (best effort — survives while the serverless container is warm)
-        if (is_readable($cacheFile)) {
-            $cached = json_decode(file_get_contents($cacheFile), true);
-            if ($cached && time() < $cached['expires'] - 30) {
-                self::$accessToken = $cached['token'];
-                self::$accessTokenExpires = $cached['expires'];
-                return self::$accessToken;
-            }
-        }
-
-        $now = time();
-        $header = ['alg' => 'RS256', 'typ' => 'JWT'];
-        $claims = [
-            'iss'   => $this->clientEmail,
-            'scope' => 'https://www.googleapis.com/auth/datastore',
-            'aud'   => 'https://oauth2.googleapis.com/token',
-            'iat'   => $now,
-            'exp'   => $now + 3600,
-        ];
-
-        $segments = [
-            $this->base64url(json_encode($header)),
-            $this->base64url(json_encode($claims)),
-        ];
-        $signingInput = implode('.', $segments);
-
-        $signature = '';
-        $ok = openssl_sign($signingInput, $signature, $this->privateKey, 'SHA256');
-        if (!$ok) {
-            die('Firestore auth failed: could not sign JWT. Check FIRESTORE_PRIVATE_KEY.');
-        }
-        $segments[] = $this->base64url($signature);
-        $jwt = implode('.', $segments);
-
-        $response = $this->httpPost('https://oauth2.googleapis.com/token', [
-            'grant_type' => 'urn:ietf:params:oauth:grant-type:jwt-bearer',
-            'assertion'  => $jwt,
-        ], true);
-
-        $data = json_decode($response, true);
-        if (!isset($data['access_token'])) {
-            die('Firestore auth failed: ' . $response);
-        }
-
-        self::$accessToken = $data['access_token'];
-        self::$accessTokenExpires = $now + (int)$data['expires_in'];
-        @file_put_contents($cacheFile, json_encode([
-            'token' => self::$accessToken,
-            'expires' => self::$accessTokenExpires,
-        ]));
-
-        return self::$accessToken;
-    }
-
-    private function base64url($data)
-    {
-        return rtrim(strtr(base64_encode($data), '+/', '-_'), '=');
+        return $url . (strpos($url, '?') !== false ? '&' : '?') . 'key=' . urlencode($this->apiKey);
     }
 
     /* ============================================================
        LOW-LEVEL HTTP
        ============================================================ */
 
-    private function httpPost($url, $body, $isForm = false)
+    /** Lazily create (once) the shared curl handle used for every call. */
+    private function curlHandle()
     {
-        $ch = curl_init($url);
-        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-        curl_setopt($ch, CURLOPT_POST, true);
-        curl_setopt($ch, CURLOPT_POSTFIELDS, $isForm ? http_build_query($body) : json_encode($body));
-        curl_setopt($ch, CURLOPT_HTTPHEADER, $isForm
-            ? ['Content-Type: application/x-www-form-urlencoded']
-            : ['Content-Type: application/json', 'Authorization: Bearer ' . $this->getAccessToken()]);
-        $result = curl_exec($ch);
-        if ($result === false) {
-            $err = curl_error($ch);
-            die("cURL request to $url failed: $err\n"
-              . "This usually means the curl PHP extension isn't enabled, or curl can't find a valid "
-              . "SSL certificate bundle. See the README's Windows troubleshooting notes.\n");
+        if ($this->ch === null) {
+            $this->ch = curl_init();
+            curl_setopt($this->ch, CURLOPT_RETURNTRANSFER, true);
+            curl_setopt($this->ch, CURLOPT_CONNECTTIMEOUT, 5);  // fail fast instead of hanging
+            curl_setopt($this->ch, CURLOPT_TIMEOUT, 15);
+            curl_setopt($this->ch, CURLOPT_TCP_KEEPALIVE, 1);
         }
-        return $result;
+        return $this->ch;
     }
 
     private function request($method, $url, $body = null)
     {
-        $ch = curl_init($url);
-        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+        $ch = $this->curlHandle();
+        curl_setopt($ch, CURLOPT_URL, $this->withKey($url));
+        curl_setopt($ch, CURLOPT_HTTPGET, true); // reset any leftover method/body from a prior call on this handle
         curl_setopt($ch, CURLOPT_CUSTOMREQUEST, $method);
-        $headers = ['Authorization: Bearer ' . $this->getAccessToken(), 'Content-Type: application/json'];
+        $headers = ['Content-Type: application/json'];
         if ($body !== null) {
             curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($body));
         }
@@ -158,11 +98,18 @@ class Firestore
         $result = curl_exec($ch);
         if ($result === false) {
             $err = curl_error($ch);
-            die("cURL request to $url failed: $err\n");
+            die("cURL request to $url failed: $err\n"
+              . "This usually means the curl PHP extension isn't enabled, or curl can't find a valid "
+              . "SSL certificate bundle. See the README's Windows troubleshooting notes.\n");
         }
         $status = curl_getinfo($ch, CURLINFO_HTTP_CODE);
         $decoded = json_decode($result, true);
         return ['status' => $status, 'body' => $decoded];
+    }
+
+    public function __destruct()
+    {
+        if ($this->ch !== null) curl_close($this->ch);
     }
 
     /* ============================================================

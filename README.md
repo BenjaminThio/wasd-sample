@@ -16,12 +16,14 @@ for WampServer-style apps to connect to).
   point at `/css/style.css` and `/js/main.js` (root-absolute) instead of
   `css/style.css` / `js/main.js`, since the pages that reference them now
   run from inside `/api/`.
-- **`api/lib/Firestore.php`** — new: a small REST-API client for Firestore,
-  written with plain `curl` + `openssl`. It does **not** use the official
+- **`api/lib/Firestore.php`** — a small REST-API client for Firestore,
+  written with plain `curl`. It does **not** use the official
   `google/cloud-firestore` Composer package, because that package needs the
-  PHP `grpc` extension, which Vercel's PHP runtime doesn't provide. This
-  client authenticates with a service account and talks to the Firestore
-  REST API directly, so there are zero Composer dependencies.
+  PHP `grpc` extension, which Vercel's PHP runtime doesn't provide.
+  Authenticates using your Firebase project's **Web API key** (appended as
+  `?key=...` on every request) rather than a service account — simpler to
+  set up, but see the security note in "Create a Firestore database" below
+  before you rely on this for anything beyond a personal project.
 - **`api/config.php`** — now creates a `Firestore` client instead of a
   `mysqli` connection, and adds helper functions (`get_all_games()`,
   `get_cart_items()`, `save_review()`, etc.) that every page calls instead
@@ -72,25 +74,52 @@ the bare domain root (`/`) sends people straight to `/api/index.php`.
 ## 1. Create a Firestore database
 
 1. Go to the [Firebase console](https://console.firebase.google.com/),
-   create a project (or use an existing GCP project).
-2. Build → Firestore Database → Create database → **Native mode**, any
-   region.
-3. Project settings (gear icon) → **Service accounts** → **Generate new
-   private key**. This downloads a JSON file — keep it secret, never commit
-   it to Git.
-
-From that JSON file you need three values:
+   create a project (or use an existing one).
+2. Build → Firestore Database → Create database → **Native mode**, pick
+   whatever region is closest to your users (this project already used
+   Singapore).
+3. Project settings (gear icon) → **General** tab → scroll to "Your apps" →
+   add a **Web app** if you haven't already → copy the `apiKey` and
+   `projectId` out of the config snippet it shows you.
 
 ```
-FIRESTORE_PROJECT_ID   = project_id
-FIRESTORE_CLIENT_EMAIL = client_email
-FIRESTORE_PRIVATE_KEY  = private_key   (the whole "-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----\n" string)
+FIRESTORE_PROJECT_ID = projectId
+FIRESTORE_API_KEY    = apiKey
 ```
 
-Since Firestore access here goes through your own server code with a
-service account (never the browser), you can leave the default Firestore
-security rules ("deny all client access") in place — nothing needs to be
-opened up publicly.
+### ⚠️ Security rules — read this before deploying
+
+This setup authenticates with your project's public Web API key instead of
+a service account, since plain PHP has no Firebase Auth session to attach
+to a request. That means **Firestore Security Rules are the only thing
+protecting your data**, and they have to be opened up for this app to work
+at all:
+
+Firestore Database → your database → **Rules** tab → replace the rules
+with:
+
+```
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /{document=**} {
+      allow read, write: if true;
+    }
+  }
+}
+```
+
+**What this means in practice:** anyone who has your project id and API
+key (both visible to anyone who opens your site's network requests) can
+read, edit, or delete every document in your database directly — every
+user's password hash, every order, everything — with no login required.
+This is a deliberate simplicity-over-security tradeoff that's fine for a
+personal project or portfolio piece where the data isn't sensitive and
+isn't real. Don't use this pattern for an app that holds real user data,
+real payment info, or anything you wouldn't want public. The secure
+alternative is the service-account approach this project used originally
+(OAuth-based, no open rules needed) — happy to switch back to that at any
+point if this app's purpose changes.
 
 ## 2. Seed the demo data (once)
 
@@ -98,11 +127,7 @@ Locally, with PHP installed:
 
 ```bash
 export FIRESTORE_PROJECT_ID=your-project-id
-export FIRESTORE_CLIENT_EMAIL=your-service-account@your-project.iam.gserviceaccount.com
-export FIRESTORE_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----
-...
------END PRIVATE KEY-----
-"
+export FIRESTORE_API_KEY=your-web-api-key
 php api/seed_firestore.php
 ```
 
@@ -127,9 +152,7 @@ In the Vercel dashboard → your project → **Settings → Environment
 Variables**, add:
 
 - `FIRESTORE_PROJECT_ID`
-- `FIRESTORE_CLIENT_EMAIL`
-- `FIRESTORE_PRIVATE_KEY` (paste it with the literal `\n` sequences kept, or
-  as real newlines — the client converts either form)
+- `FIRESTORE_API_KEY`
 
 Redeploy after adding the env vars so the running functions pick them up.
 
@@ -172,6 +195,48 @@ collection since nothing deletes them automatically. In the Firebase
 console, go to **Firestore Database → your database → TTL** and add a TTL
 policy on the `sessions` collection using the `expires_at` field — Firestore
 will then delete expired session documents on its own.
+
+## Fixing a very high LCP / "everything feels slow"
+
+If Chrome DevTools shows a Largest Contentful Paint of several seconds (or
+more), the page isn't slow because of CSS or JavaScript — it's slow because
+the PHP function is blocked making several sequential network calls to
+Firestore *before it sends any HTML at all*. Two causes, both addressed:
+
+**1. Connection reuse (already fixed in this version).** The Firestore
+client used to open a brand-new TLS connection for every single call and
+close it immediately after — so a page making 6-8 Firestore calls paid 6-8
+full handshakes instead of 1. `api/lib/Firestore.php` now reuses one curl
+handle for the whole request, so only the first call pays the handshake
+cost and the rest reuse that connection.
+
+**2. Region mismatch (you need to check this one).** Vercel Functions
+default to **Washington, D.C., USA (`iad1`)** unless you've explicitly
+picked a different region. If your Firestore database is located in Asia
+(likely, if you created it without changing the default while based in
+Malaysia) and your Vercel function runs in the US, every one of those
+Firestore calls crosses the Pacific twice — and since they happen one after
+another rather than in parallel, that latency adds up fast.
+
+To check and fix:
+
+1. **Find your Firestore location:** Firebase console → your project →
+   Project settings (gear icon) → General tab → look for
+   "Default GCP resource location" (e.g. `asia-southeast1` = Singapore,
+   `nam5` = central US, `eur3` = Europe).
+2. **Find/set your Vercel function region:** Vercel dashboard → your
+   project → Settings → Functions → Function Region. Pick the region
+   closest to your Firestore location (e.g. Firestore in
+   `asia-southeast1` → pick Vercel's `sin1`, Singapore).
+   - On the Hobby plan you can pick one region; Pro allows up to five.
+   - You can also set it in `vercel.json` with a `"regions": ["sin1"]` key
+     — but the dashboard setting is the more reliable place to confirm it
+     actually took effect (check the deployment's Build Summary afterward).
+3. Redeploy after changing the region.
+
+Firestore's location can't be changed after the database is created
+without recreating it, so region alignment is really about pointing your
+*Vercel function* at wherever your *Firestore database* already is.
 
 ## Notes / limitations of this migration
 

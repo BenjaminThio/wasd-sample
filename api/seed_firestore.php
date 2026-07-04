@@ -7,8 +7,7 @@
    Run it once, locally, with your Firestore env vars set:
 
      export FIRESTORE_PROJECT_ID=your-project-id
-     export FIRESTORE_CLIENT_EMAIL=your-service-account@...gserviceaccount.com
-     export FIRESTORE_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----\n"
+     export FIRESTORE_API_KEY=your-web-api-key
      php api/seed_firestore.php   (run from the project root)
 
    Do NOT deploy this file to a public URL / do NOT leave it
