@@ -6,20 +6,33 @@ for WampServer-style apps to connect to).
 
 ## What changed
 
-- **`config.php`** — now creates a `Firestore` client (`lib/Firestore.php`)
-  instead of a `mysqli` connection, and adds helper functions
-  (`get_all_games()`, `get_cart_items()`, `save_review()`, etc.) that every
-  page calls instead of writing raw SQL.
-- **`lib/Firestore.php`** — a small REST-API client for Firestore, written
-  with plain `curl` + `openssl`. It does **not** use the official
+- **File layout** — every `.php` file (pages, `includes/`, `lib/`) now lives
+  under an **`api/`** folder, which is the convention the `vercel-php`
+  runtime expects for serverless functions. `css/` and `js/` stay at the
+  project root as plain static assets. Nothing inside the PHP files needed
+  path changes for this — `require_once`/`include` calls are relative to
+  each other and moved together as a whole tree — except the stylesheet and
+  script tags in `includes/header.php` / `includes/footer.php`, which now
+  point at `/css/style.css` and `/js/main.js` (root-absolute) instead of
+  `css/style.css` / `js/main.js`, since the pages that reference them now
+  run from inside `/api/`.
+- **`api/lib/Firestore.php`** — new: a small REST-API client for Firestore,
+  written with plain `curl` + `openssl`. It does **not** use the official
   `google/cloud-firestore` Composer package, because that package needs the
   PHP `grpc` extension, which Vercel's PHP runtime doesn't provide. This
   client authenticates with a service account and talks to the Firestore
   REST API directly, so there are zero Composer dependencies.
-- **Every page file** (`admin.php`, `cart.php`, `game.php`, `games.php`,
-  etc.) — rewritten to call the new helper functions. The HTML/CSS/JS output
-  is unchanged.
-- **`database.sql`** → **`seed_firestore.php`** — a one-time script that
+- **`api/config.php`** — now creates a `Firestore` client instead of a
+  `mysqli` connection, and adds helper functions (`get_all_games()`,
+  `get_cart_items()`, `save_review()`, etc.) that every page calls instead
+  of writing raw SQL.
+- **Every page file** (`api/admin.php`, `api/cart.php`, `api/game.php`,
+  `api/games.php`, etc.) — rewritten to call the new helper functions. The
+  HTML/CSS/JS output is unchanged, and all the internal links between pages
+  (`href="games.php"`, `action="cart.php"`, ...) work exactly as before,
+  since they're relative and every page still lives alongside its siblings
+  — just one level deeper, inside `api/`.
+- **`database.sql`** → **`api/seed_firestore.php`** — a one-time script that
   loads the same demo accounts/games/reviews into Firestore.
 - IDs: games/users/orders keep short numeric ids (`1`, `2`, `3`...) via a
   Firestore counter, so URLs like `game.php?id=5` still work. Reviews, cart
@@ -29,6 +42,32 @@ for WampServer-style apps to connect to).
   PHP after fetching the catalog, since Firestore has no `LIKE`, `JOIN`, or
   `AVG()`. This is a normal, standard pattern for Firestore apps and is fine
   for a catalog of dozens or a few hundred games.
+
+## File structure
+
+```
+wasd-store/
+├── vercel.json              # tells Vercel how to run the PHP functions
+├── .vercelignore            # keeps the seed script out of the deployment
+├── css/style.css            # static asset, served directly by Vercel
+├── js/main.js                # static asset, served directly by Vercel
+└── api/
+    ├── config.php            # Firestore connection + all helper functions
+    ├── seed_firestore.php    # run once locally to load demo data
+    ├── index.php, games.php, game.php, cart.php, checkout.php,
+    │   login.php, register.php, logout.php, profile.php, wishlist.php,
+    │   contact.php, admin.php, admin_edit.php
+    ├── includes/
+    │   ├── header.php
+    │   └── footer.php
+    └── lib/
+        └── Firestore.php     # the Firestore REST client
+```
+
+Because everything under `api/` is a serverless function on Vercel, your
+site's pages are reached at URLs like `/api/index.php`, `/api/games.php`,
+`/api/cart.php`, and so on. `vercel.json` includes a redirect so visiting
+the bare domain root (`/`) sends people straight to `/api/index.php`.
 
 ## 1. Create a Firestore database
 
@@ -64,7 +103,7 @@ export FIRESTORE_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----
 ...
 -----END PRIVATE KEY-----
 "
-php seed_firestore.php
+php api/seed_firestore.php
 ```
 
 This creates the same 2 demo accounts, 8 games, and 4 reviews the old
@@ -94,9 +133,14 @@ Variables**, add:
 
 Redeploy after adding the env vars so the running functions pick them up.
 
-**Don't deploy `seed_firestore.php` to production once you've seeded your
-data** — delete it or add it to `.vercelignore` so it isn't reachable at a
-public URL.
+**Don't deploy `api/seed_firestore.php` to production once you've seeded
+your data** — it's already excluded via `.vercelignore`, but double check
+it isn't reachable at a public URL before you consider the app "live".
+
+Your site's pages are served from `/api/...` (e.g.
+`https://your-app.vercel.app/api/index.php`,
+`https://your-app.vercel.app/api/games.php`). The included redirect sends
+the bare domain root to `/api/index.php` automatically.
 
 ## Notes / limitations of this migration
 
