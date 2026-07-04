@@ -16,20 +16,12 @@ require_once __DIR__ . '/lib/FirestoreSessionHandler.php';
 
 /* ---------- Firestore connection ----------
    Set these as environment variables (in Vercel: Project Settings
-   -> Environment Variables).
-   FIRESTORE_PROJECT_ID = your Firebase project id
-   FIRESTORE_API_KEY    = the Web API key from Firebase console ->
-                           Project settings -> General -> Your apps ->
-                           Web app -> SDK setup and configuration
-
-   NOTE ON SECURITY: this uses your project's public Web API key
-   instead of a service account, which is simpler to set up but means
-   Firestore Security Rules must allow unauthenticated read/write
-   (since plain PHP has no Firebase Auth identity to check). That
-   makes every document in your database — including password
-   hashes — readable/writable by anyone who has your project id and
-   API key. Fine for a personal/demo project; don't use this pattern
-   for an app that holds real user data. */
+   -> Environment Variables). Never commit real credentials.
+   FIRESTORE_PROJECT_ID   = your Firebase/GCP project id
+   FIRESTORE_CLIENT_EMAIL = the service account's client_email
+   FIRESTORE_PRIVATE_KEY  = the service account's private_key
+                             (keep the \n sequences; the client
+                             converts them back to real newlines) */
 $conn = Firestore::fromEnv();
 
 /* Sessions are stored in Firestore (not local disk) because Vercel
