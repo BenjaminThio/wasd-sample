@@ -142,6 +142,37 @@ Your site's pages are served from `/api/...` (e.g.
 `https://your-app.vercel.app/api/games.php`). The included redirect sends
 the bare domain root to `/api/index.php` automatically.
 
+## Performance & session persistence fixes
+
+Two issues that show up once you're actually running on Vercel:
+
+**Pages feel slow to load.** Firestore has no server-side JOIN, so pages
+like `games.php`/`index.php` fetch whole collections into PHP and work with
+them there — and some pages called the same collection more than once while
+building the page (catalog + genre filter list, etc.), meaning multiple
+separate network round-trips for data already fetched. `api/lib/Firestore.php`
+now caches reads for the lifetime of a single request, so repeated calls to
+the same collection/document reuse the first result instead of re-fetching.
+
+**Staying logged in doesn't work.** PHP's default session handler writes
+session data to a local temp file. On Vercel, each request can be picked up
+by a different serverless function instance with its own disposable
+filesystem — so a session written during login may simply not exist by the
+time your next request lands on a different instance, which looks exactly
+like "logging in does nothing." `api/lib/FirestoreSessionHandler.php` stores
+session data in a `sessions` collection in Firestore instead, so every
+invocation reads/writes the same place no matter which instance handles it.
+
+This adds two small Firestore reads/writes per page (reading and saving the
+session), which is normal and necessary — much cheaper than the collection
+fetches this app already does, and it's what makes login persist correctly.
+
+**One-time optional cleanup:** old sessions accumulate in the `sessions`
+collection since nothing deletes them automatically. In the Firebase
+console, go to **Firestore Database → your database → TTL** and add a TTL
+policy on the `sessions` collection using the `expires_at` field — Firestore
+will then delete expired session documents on its own.
+
 ## Notes / limitations of this migration
 
 - **Order numbers / new-doc counters** use a simple read-then-write counter

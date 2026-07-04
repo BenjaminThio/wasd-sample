@@ -11,8 +11,8 @@
    call the helper functions below instead of raw SQL.
    ============================================================ */
 
-session_start();
 require_once __DIR__ . '/lib/Firestore.php';
+require_once __DIR__ . '/lib/FirestoreSessionHandler.php';
 
 /* ---------- Firestore connection ----------
    Set these as environment variables (in Vercel: Project Settings
@@ -23,6 +23,14 @@ require_once __DIR__ . '/lib/Firestore.php';
                              (keep the \n sequences; the client
                              converts them back to real newlines) */
 $conn = Firestore::fromEnv();
+
+/* Sessions are stored in Firestore (not local disk) because Vercel
+   serverless functions don't share a filesystem between invocations —
+   the default file-based session handler would randomly "forget" that
+   you're logged in as soon as a different function instance picks up
+   your next request. Must be registered before session_start(). */
+session_set_save_handler(new FirestoreSessionHandler($conn), true);
+session_start();
 
 /* Timestamps are stored as plain unix epoch integers in Firestore
    (simpler + cheaper to decode than Firestore's native timestamp

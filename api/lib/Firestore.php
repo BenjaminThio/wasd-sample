@@ -20,6 +20,14 @@ class Firestore
     private static $accessToken = null;
     private static $accessTokenExpires = 0;
 
+    /* Per-request read cache. Pages like games.php/index.php call
+       all('games') or where(...) more than once while building a page
+       (catalog listing + genre filter list, etc.) — without this, every
+       one of those calls is a fresh HTTPS round-trip to Firestore, which
+       is what made pages feel slow. Writes (set/update/delete/add) clear
+       the relevant cache entries so you never read stale data back. */
+    private $cache = array();
+
     public function __construct($projectId, $clientEmail, $privateKey)
     {
         $this->projectId = $projectId;
@@ -128,6 +136,12 @@ class Firestore
             ? ['Content-Type: application/x-www-form-urlencoded']
             : ['Content-Type: application/json', 'Authorization: Bearer ' . $this->getAccessToken()]);
         $result = curl_exec($ch);
+        if ($result === false) {
+            $err = curl_error($ch);
+            die("cURL request to $url failed: $err\n"
+              . "This usually means the curl PHP extension isn't enabled, or curl can't find a valid "
+              . "SSL certificate bundle. See the README's Windows troubleshooting notes.\n");
+        }
         return $result;
     }
 
@@ -142,6 +156,10 @@ class Firestore
         }
         curl_setopt($ch, CURLOPT_HTTPHEADER, $headers);
         $result = curl_exec($ch);
+        if ($result === false) {
+            $err = curl_error($ch);
+            die("cURL request to $url failed: $err\n");
+        }
         $status = curl_getinfo($ch, CURLINFO_HTTP_CODE);
         $decoded = json_decode($result, true);
         return ['status' => $status, 'body' => $decoded];
@@ -219,11 +237,29 @@ class Firestore
     /** Get one document by id. Returns assoc array (with '_id') or null if missing. */
     public function get($collection, $id)
     {
+        $key = "get:{$collection}/{$id}";
+        if (array_key_exists($key, $this->cache)) return $this->cache[$key];
+
         $res = $this->request('GET', "{$this->baseUrl}/{$collection}/" . rawurlencode($id));
-        if ($res['status'] !== 200 || !isset($res['body']['fields'])) return null;
+        if ($res['status'] !== 200 || !isset($res['body']['fields'])) {
+            $this->cache[$key] = null;
+            return null;
+        }
         $doc = $this->decodeFields($res['body']['fields']);
         $doc['_id'] = $id;
+        $this->cache[$key] = $doc;
         return $doc;
+    }
+
+    /** Drop cached reads for a collection (and one doc id, if given) after a write. */
+    private function invalidate($collection, $id = null)
+    {
+        if ($id !== null) unset($this->cache["get:{$collection}/{$id}"]);
+        foreach (array_keys($this->cache) as $key) {
+            if ($key === "all:{$collection}" || strpos($key, "where:{$collection}:") === 0) {
+                unset($this->cache[$key]);
+            }
+        }
     }
 
     /** Create or fully overwrite a document at a specific id. */
@@ -232,6 +268,7 @@ class Firestore
         $body = ['fields' => $this->encodeFields($data)];
         $url = "{$this->baseUrl}/{$collection}/" . rawurlencode($id);
         $this->request('PATCH', $url, $body);
+        $this->invalidate($collection, $id);
         $data['_id'] = $id;
         return $data;
     }
@@ -245,6 +282,7 @@ class Firestore
         $url = "{$this->baseUrl}/{$collection}/" . rawurlencode($id) . '?' . $mask;
         $body = ['fields' => $this->encodeFields($data)];
         $this->request('PATCH', $url, $body);
+        $this->invalidate($collection, $id);
         return true;
     }
 
@@ -253,6 +291,7 @@ class Firestore
     {
         $body = ['fields' => $this->encodeFields($data)];
         $res = $this->request('POST', "{$this->baseUrl}/{$collection}", $body);
+        $this->invalidate($collection);
         if (!isset($res['body']['name'])) return null;
         return $this->idFromName($res['body']['name']);
     }
@@ -261,6 +300,7 @@ class Firestore
     public function delete($collection, $id)
     {
         $this->request('DELETE', "{$this->baseUrl}/{$collection}/" . rawurlencode($id));
+        $this->invalidate($collection, $id);
         return true;
     }
 
@@ -271,6 +311,9 @@ class Firestore
      */
     public function all($collection)
     {
+        $key = "all:{$collection}";
+        if (array_key_exists($key, $this->cache)) return $this->cache[$key];
+
         $out = [];
         $pageToken = null;
         do {
@@ -286,12 +329,17 @@ class Firestore
             }
             $pageToken = isset($res['body']['nextPageToken']) ? $res['body']['nextPageToken'] : null;
         } while ($pageToken);
+
+        $this->cache[$key] = $out;
         return $out;
     }
 
     /** Query a collection for documents where $field == $value (uses :runQuery). */
     public function where($collection, $field, $op, $value)
     {
+        $key = "where:{$collection}:{$field}:{$op}:" . json_encode($value);
+        if (array_key_exists($key, $this->cache)) return $this->cache[$key];
+
         $filterValue = $this->encodeValue($value);
         $body = [
             'structuredQuery' => [
@@ -317,6 +365,8 @@ class Firestore
                 }
             }
         }
+
+        $this->cache[$key] = $out;
         return $out;
     }
 
